@@ -2,7 +2,7 @@ from django.core.management.base import BaseCommand
 from django.conf import settings
 from telegram import Bot, Update
 from telegram.ext import CallbackContext, MessageHandler, Updater, CommandHandler, filters, ApplicationBuilder, \
-    ContextTypes, CallbackQueryHandler
+    ContextTypes, CallbackQueryHandler, ChosenInlineResultHandler
 from telegram._inline.inlinekeyboardbutton import InlineKeyboardButton
 from telegram._inline.inlinekeyboardmarkup import InlineKeyboardMarkup
 from telegram._replykeyboardmarkup import KeyboardButton, ReplyKeyboardMarkup
@@ -32,7 +32,7 @@ logging.basicConfig(
 
 application = ApplicationBuilder().token(settings.TOKEN).build()
 
-DAY, MONTH, BACK, SETTINGS = range(4)
+DAY, MONTH, BACK, SETTINGS, RES_NAME, BACK_MON, QWER = range(7)
 
 
 async def do_echo(update: Update, context: CallbackContext):
@@ -63,7 +63,7 @@ async def do_echo(update: Update, context: CallbackContext):
         await context.bot.send_message(
             chat_id=update.message.chat_id,
             text=f"Cохранено \n"
-                 f"{x[0]}--Категория--{x[1]}",
+                 f"{x[0]}.0 -- Категория -- {x[1]}",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -97,28 +97,30 @@ async def day_expenses(update: Update, context: CallbackContext):
     prof = Profile.objects.get(external_id=pro)
     prof_id = prof.id
 
-    queries = DayEx.objects.filter(profile=prof_id, date=datetime.date.today())
+    days_expenses = DayEx.objects.filter(profile=prof_id, date=datetime.date.today())
+    day1 = DayEx.objects.filter(profile=prof_id, date=datetime.date.today()).values('id_category').annotate(
+        Sum('sum')).order_by()
+    list_of = []
+    for i in day1:
+        category_name = str(CategoryEx.objects.get(id=i.get("id_category")))
+        sum_sum = i.get('sum__sum')
+        res_name = re.sub(f'[0-9]', '', category_name).strip()
+        list_of.append(
+            [InlineKeyboardButton(f"{res_name}: {sum_sum}.0", callback_data=f"0{res_name}")])
+    b = 0
+    for j in days_expenses:
+        b += j.sum
 
-    a = 0
+    list_of.append([InlineKeyboardButton(text='<<', callback_data=str("&&")),
+                    InlineKeyboardButton(text='>>', callback_data=str("&&")),
+                    ])
+    list_of.append([InlineKeyboardButton('Назад', callback_data=str(BACK))])
 
-    for i in queries:
-        a += i.sum
+    reply_markup = InlineKeyboardMarkup(list_of)
 
-    keyboard = [
-        [
-
-        ],
-        [
-            InlineKeyboardButton("<<", callback_data=str("Left")),
-            InlineKeyboardButton(">>", callback_data=str("Right")),
-        ],
-        [InlineKeyboardButton("Назад", callback_data=str(BACK))]
-    ]
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(
         text=f"{datetime.date.today()}\n"
-             f"Расходы: {a} ", reply_markup=reply_markup
+             f"Расходы: {b}.0 ", reply_markup=reply_markup
     )
 
 
@@ -136,15 +138,15 @@ async def month_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     day = today.day
 
     month_expens = MonthsEx.objects.filter(profile=prof_id, date__year=year, date__month=month)
-    month1 = MonthsEx.objects.filter(profile=prof_id).values('id_category').annotate(Sum('sum')).order_by()
+    month1 = MonthsEx.objects.filter(profile=prof_id, date__year=year, date__month=month).values(
+        'id_category').annotate(Sum('sum')).order_by()
     list_of = []
-    print(month1)
     for i in month1:
         category_name = str(CategoryEx.objects.get(id=i.get("id_category")))
         sum_sum = i.get('sum__sum')
-        res_name = re.sub(f'[0-9]', '', category_name)
+        res_name = re.sub(f'[0-9]', '', category_name).strip()
         list_of.append(
-            [InlineKeyboardButton(f"{res_name} -- {sum_sum}", callback_data=str("&&"))])
+            [InlineKeyboardButton(f"{res_name}: {sum_sum}.0", callback_data=res_name)])
 
     b = 0
     for j in month_expens:
@@ -160,7 +162,7 @@ async def month_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         # chat_id=query.from_user.id,
         text=f"{calendar.month_name[datetime.date.today().month]} {datetime.date.today().year} \n"
-             f"Расходы: {b}",
+             f"Расходы: {b}.0",
         reply_markup=reply_markup
     )
 
@@ -197,9 +199,73 @@ async def back_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(
         text=f"———\n"
-             f"в этом месяце: {b} \n"
-             f"Сегодня: {a}",
+             f"в этом месяце: {b}.0 \n"
+             f"Сегодня: {a}.0",
         reply_markup=reply_markup,
+    )
+
+
+async def months_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    keyboard = [
+        [InlineKeyboardButton("Назад", callback_data=str(BACK_MON))]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    profile = Profile.objects.get(external_id=query.from_user.id)
+    name_category = CategoryEx.objects.get(name=query.data)
+    expens = MonthsEx.objects.filter(profile=profile.id, id_category=name_category.id,
+                                     date__month=datetime.date.today().month, date__year=datetime.date.today().year)
+    months_expenses = 0
+
+    date_l_expenses = ""
+
+    for item in expens:
+        months_expenses += item.sum
+        date_l_expenses += f"----- {item.date} -----\n" \
+                           f"◦ {item.sum}.0\n"
+
+    await query.edit_message_text(
+        text=f"{query.data}\n"
+             f"\n"
+             f"{calendar.month_name[datetime.date.today().month]} {datetime.date.today().year}\n"
+             f"Расходы: {months_expenses}.0\n"
+             f"\n"
+             f"{date_l_expenses}\n",
+        reply_markup=reply_markup
+    )
+
+
+async def day_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    call_back_data = query.data
+
+    keyboard = [
+        [InlineKeyboardButton("Назад", callback_data=str(QWER))]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    profile = Profile.objects.get(external_id=query.from_user.id)
+    name_category = CategoryEx.objects.get(name=call_back_data[1:])
+    expens = DayEx.objects.filter(profile=profile.id, id_category=name_category.id, date=datetime.date.today())
+
+    months_expenses = 0
+    date_l_expenses = ""
+
+    for item in expens:
+        months_expenses += item.sum
+        date_l_expenses += f"----- {item.date} -----\n" \
+                           f"◦ {item.sum}.0\n"
+
+    await query.edit_message_text(
+        text=f"{query.data}\n"
+             f"\n"
+             f"{calendar.month_name[datetime.date.today().month]} {datetime.date.today().year}\n"
+             f"Расходы: {months_expenses}.0\n"
+             f"\n"
+             f"{date_l_expenses}\n",
+        reply_markup=reply_markup
     )
 
 
@@ -213,6 +279,12 @@ application.add_handler(s)
 application.add_handler(CallbackQueryHandler(day_expenses, pattern="^" + str(DAY) + "$"))
 application.add_handler(CallbackQueryHandler(month_expenses, pattern="^" + str(MONTH) + "$"))
 application.add_handler(CallbackQueryHandler(back_menu, pattern="^" + str(BACK) + "$"))
+application.add_handler(CallbackQueryHandler(month_expenses, pattern="^" + str(BACK_MON) + "$"))
+application.add_handler(CallbackQueryHandler(day_expenses, pattern="^" + str(QWER) + "$"))
+
+for i in CategoryEx.objects.all():
+    application.add_handler(CallbackQueryHandler(months_detail, str(i.name)))
+    application.add_handler(CallbackQueryHandler(day_detail, str(f"0{i.name}")))
 application.add_handler(echo_handler)
 
 application.run_polling()
