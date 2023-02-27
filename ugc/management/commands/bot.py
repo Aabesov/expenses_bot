@@ -15,6 +15,7 @@ from django.core.exceptions import ValidationError
 from ugc.forms import MessageForm
 from django.db.models.aggregates import Count, Sum
 from ugc.models import Message, Profile, CategoryEx, DayEx, MonthsEx
+from datetime import timedelta
 import logging
 import os
 import django
@@ -32,7 +33,8 @@ logging.basicConfig(
 
 application = ApplicationBuilder().token(settings.TOKEN).build()
 
-DAY, MONTH, BACK, SETTINGS, RES_NAME, BACK_MON, QWER = range(7)
+DAY, MONTH, BACK, SETTINGS, RES_NAME, \
+    BACK_MON, QWER, YESTERDAY, TOMORROW = range(9)
 
 
 async def do_echo(update: Update, context: CallbackContext):
@@ -111,8 +113,8 @@ async def day_expenses(update: Update, context: CallbackContext):
     for j in days_expenses:
         b += j.sum
 
-    list_of.append([InlineKeyboardButton(text='<<', callback_data=str("&&")),
-                    InlineKeyboardButton(text='>>', callback_data=str("&&")),
+    list_of.append([InlineKeyboardButton(text='<<', callback_data=str(YESTERDAY)),
+                    InlineKeyboardButton(text='>>', callback_data=str(TOMORROW)),
                     ])
     list_of.append([InlineKeyboardButton('Назад', callback_data=str(BACK))])
 
@@ -241,6 +243,7 @@ async def day_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     call_back_data = query.data
+    date = query.message.text.split('\n')[0]
 
     keyboard = [
         [InlineKeyboardButton("Назад", callback_data=str(QWER))]
@@ -248,18 +251,17 @@ async def day_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     profile = Profile.objects.get(external_id=query.from_user.id)
     name_category = CategoryEx.objects.get(name=call_back_data[1:])
-    expens = DayEx.objects.filter(profile=profile.id, id_category=name_category.id, date=datetime.date.today())
+    expens = DayEx.objects.filter(profile=profile.id, id_category=name_category.id, date=date)
 
     months_expenses = 0
-    date_l_expenses = ""
+    date_l_expenses = f"----- {date} -----\n"
 
     for item in expens:
         months_expenses += item.sum
-        date_l_expenses += f"----- {item.date} -----\n" \
-                           f"◦ {item.sum}.0\n"
+        date_l_expenses += f"◦ {item.sum}.0\n"
 
     await query.edit_message_text(
-        text=f"{query.data}\n"
+        text=f"{query.data[1:]}\n"
              f"\n"
              f"{calendar.month_name[datetime.date.today().month]} {datetime.date.today().year}\n"
              f"Расходы: {months_expenses}.0\n"
@@ -267,6 +269,73 @@ async def day_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
              f"{date_l_expenses}\n",
         reply_markup=reply_markup
     )
+
+
+async def days(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    pro = query.from_user.id
+    prof = Profile.objects.get(external_id=pro)
+    prof_id = prof.id
+    if query.data == '7':
+        today = query.message.text.split('\n')[0]
+        yesterday = datetime.datetime.strptime(today, '%Y-%m-%d') - timedelta(1)
+
+        days_expenses = DayEx.objects.filter(profile=prof_id, date=yesterday)
+        day1 = DayEx.objects.filter(profile=prof_id, date=yesterday).values('id_category').annotate(
+            Sum('sum')).order_by()
+        list_of = []
+        for i in day1:
+            category_name = str(CategoryEx.objects.get(id=i.get("id_category")))
+            sum_sum = i.get('sum__sum')
+            res_name = re.sub(f'[0-9]', '', category_name).strip()
+            list_of.append(
+                [InlineKeyboardButton(f"{res_name}: {sum_sum}.0", callback_data=f"0{res_name}")])
+
+        b = 0
+        for j in days_expenses:
+            b += j.sum
+
+        list_of.append([InlineKeyboardButton(text='<<', callback_data=str(YESTERDAY)),
+                        InlineKeyboardButton(text='>>', callback_data=str(TOMORROW)),
+                        ])
+        list_of.append([InlineKeyboardButton('Назад', callback_data=str(BACK))])
+
+        reply_markup = InlineKeyboardMarkup(list_of)
+
+        await query.edit_message_text(
+            text=f"{yesterday.strftime('%Y-%m-%d')}\n"
+                 f"Расходы: {b}.0 ", reply_markup=reply_markup
+        )
+    elif query.data == '8':
+        today = query.message.text.split('\n')[0]
+        tomorrow = datetime.datetime.strptime(today, '%Y-%m-%d') + timedelta(1)
+
+        days_expenses = DayEx.objects.filter(profile=prof_id, date=tomorrow)
+        day1 = DayEx.objects.filter(profile=prof_id, date=tomorrow).values('id_category').annotate(
+            Sum('sum')).order_by()
+        list_of = []
+        for i in day1:
+            category_name = str(CategoryEx.objects.get(id=i.get("id_category")))
+            sum_sum = i.get('sum__sum')
+            res_name = re.sub(f'[0-9]', '', category_name).strip()
+            list_of.append(
+                [InlineKeyboardButton(f"{res_name}: {sum_sum}.0", callback_data=f"0{res_name}")])
+
+        b = 0
+        for j in days_expenses:
+            b += j.sum
+
+        list_of.append([InlineKeyboardButton(text='<<', callback_data=str(YESTERDAY)),
+                        InlineKeyboardButton(text='>>', callback_data=str(TOMORROW)),
+                        ])
+        list_of.append([InlineKeyboardButton('Назад', callback_data=str(BACK))])
+
+        reply_markup = InlineKeyboardMarkup(list_of)
+
+        await query.edit_message_text(
+            text=f"{tomorrow.strftime('%Y-%m-%d')}\n"
+                 f"Расходы: {b}.0 ", reply_markup=reply_markup
+        )
 
 
 if __name__ == '__main__':
@@ -281,6 +350,8 @@ application.add_handler(CallbackQueryHandler(month_expenses, pattern="^" + str(M
 application.add_handler(CallbackQueryHandler(back_menu, pattern="^" + str(BACK) + "$"))
 application.add_handler(CallbackQueryHandler(month_expenses, pattern="^" + str(BACK_MON) + "$"))
 application.add_handler(CallbackQueryHandler(day_expenses, pattern="^" + str(QWER) + "$"))
+application.add_handler(CallbackQueryHandler(days, pattern="^" + str(YESTERDAY) + "$"))
+application.add_handler(CallbackQueryHandler(days, pattern="^" + str(TOMORROW) + "$"))
 
 for i in CategoryEx.objects.all():
     application.add_handler(CallbackQueryHandler(months_detail, str(i.name)))
