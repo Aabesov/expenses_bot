@@ -1,26 +1,19 @@
-from django.core.management.base import BaseCommand
 from django.conf import settings
-from telegram import Bot, Update
-from telegram.ext import CallbackContext, MessageHandler, Updater, CommandHandler, filters, ApplicationBuilder, \
-    ContextTypes, CallbackQueryHandler, ChosenInlineResultHandler
+from telegram import Update
+from telegram.ext import CallbackContext, MessageHandler, CommandHandler, filters, ApplicationBuilder, \
+    ContextTypes, CallbackQueryHandler
 from telegram._inline.inlinekeyboardbutton import InlineKeyboardButton
 from telegram._inline.inlinekeyboardmarkup import InlineKeyboardMarkup
-from telegram._replykeyboardmarkup import KeyboardButton, ReplyKeyboardMarkup
-from telegram.ext.filters import MessageFilter
-from telegram.request import HTTPXRequest
-from telegram._keyboardbuttonpolltype import KeyboardButtonPollType
-import asyncio
-import re
-from django.core.exceptions import ValidationError
-from ugc.forms import MessageForm
-from django.db.models.aggregates import Count, Sum
 from ugc.models import Message, Profile, CategoryEx, DayEx, MonthsEx
-from datetime import timedelta
 import logging
 import os
 import django
 import datetime
-import calendar
+import csv
+from .expenses import month_expenses, day_expenses
+from .expenses_detail import months_detail, day_detail
+from .scrooling import scrolling_days, scrolling_months
+from .delete import delete_check, delete
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'rest.settings')
 os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
@@ -34,7 +27,10 @@ logging.basicConfig(
 application = ApplicationBuilder().token(settings.TOKEN).build()
 
 DAY, MONTH, BACK, SETTINGS, RES_NAME, \
-    BACK_MON, QWER, YESTERDAY, TOMORROW = range(9)
+    BACK_MON, QWER, YESTERDAY, TOMORROW, \
+    LAST_MONTH, NEXT_MONTH, DATA, DELETE_DAY, \
+    DELETE_MONTH, NO_DEL_DAY, DELETE_DAY_2, \
+    DELETE_ANSWER = range(17)
 
 
 async def do_echo(update: Update, context: CallbackContext):
@@ -93,249 +89,166 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def day_expenses(update: Update, context: CallbackContext):
-    query = update.callback_query
-    pro = query.from_user.id
-    prof = Profile.objects.get(external_id=pro)
-    prof_id = prof.id
-
-    days_expenses = DayEx.objects.filter(profile=prof_id, date=datetime.date.today())
-    day1 = DayEx.objects.filter(profile=prof_id, date=datetime.date.today()).values('id_category').annotate(
-        Sum('sum')).order_by()
-    list_of = []
-    for i in day1:
-        category_name = str(CategoryEx.objects.get(id=i.get("id_category")))
-        sum_sum = i.get('sum__sum')
-        res_name = re.sub(f'[0-9]', '', category_name).strip()
-        list_of.append(
-            [InlineKeyboardButton(f"{res_name}: {sum_sum}.0", callback_data=f"0{res_name}")])
-    b = 0
-    for j in days_expenses:
-        b += j.sum
-
-    list_of.append([InlineKeyboardButton(text='<<', callback_data=str(YESTERDAY)),
-                    InlineKeyboardButton(text='>>', callback_data=str(TOMORROW)),
-                    ])
-    list_of.append([InlineKeyboardButton('Назад', callback_data=str(BACK))])
-
-    reply_markup = InlineKeyboardMarkup(list_of)
-
-    await query.edit_message_text(
-        text=f"{datetime.date.today()}\n"
-             f"Расходы: {b}.0 ", reply_markup=reply_markup
-    )
-
-
-async def month_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def back_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if query.data == '16':
+        query = update.callback_query
+        await query.answer()
+        cat_name = query.message.text.split('\n')[1]
+        date = query.message.text.split('\n')[0]
+        profile = Profile.objects.get(external_id=query.from_user.id)
 
-    pro = query.from_user.id
-    prof = Profile.objects.get(external_id=pro)
-    prof_id = prof.id
+        category_id = CategoryEx.objects.get(name=cat_name)
+        day_data_delete = DayEx.objects.filter(profile=profile, id_category=category_id.id, date=date).delete()
+        month_data_delete = MonthsEx.objects.filter(profile=profile, id_category=category_id.id, date=date).delete()
 
-    today = datetime.date.today()
-    year = today.year
-    month = today.month
-    day = today.day
+        await query.delete_message()
 
-    month_expens = MonthsEx.objects.filter(profile=prof_id, date__year=year, date__month=month)
-    month1 = MonthsEx.objects.filter(profile=prof_id, date__year=year, date__month=month).values(
-        'id_category').annotate(Sum('sum')).order_by()
-    list_of = []
-    for i in month1:
-        category_name = str(CategoryEx.objects.get(id=i.get("id_category")))
-        sum_sum = i.get('sum__sum')
-        res_name = re.sub(f'[0-9]', '', category_name).strip()
-        list_of.append(
-            [InlineKeyboardButton(f"{res_name}: {sum_sum}.0", callback_data=res_name)])
+        await context.bot.send_message(
+            chat_id=query.from_user.id,
+            text=f'Вы успешно удалили категорию -- {cat_name}'
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton("День", callback_data=str(DAY)),
+                InlineKeyboardButton("Месяц", callback_data=str(MONTH)),
+            ],
+            [InlineKeyboardButton("Настройки", callback_data=str(SETTINGS))],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
-    b = 0
-    for j in month_expens:
-        b += j.sum
+        pro = query.from_user.id
+        prof = Profile.objects.get(external_id=pro)
+        prof_id = prof.id
 
-    list_of.append([InlineKeyboardButton(text='<<', callback_data=str("&&")),
-                    InlineKeyboardButton(text='>>', callback_data=str("&&")),
-                    ])
-    list_of.append([InlineKeyboardButton('Назад', callback_data=str(BACK))])
+        today = datetime.date.today()
+        year = today.year
+        month = today.month
+        day = today.day
 
-    reply_markup = InlineKeyboardMarkup(list_of)
+        day_expens = DayEx.objects.filter(profile=prof_id, date=datetime.date.today())
+        month_expens = MonthsEx.objects.filter(profile=prof_id, date__year=year, date__month=month)
+        a = 0
+        b = 0
+        for i in day_expens:
+            a += i.sum
+        for j in month_expens:
+            b += j.sum
 
-    await query.edit_message_text(
-        # chat_id=query.from_user.id,
-        text=f"{calendar.month_name[datetime.date.today().month]} {datetime.date.today().year} \n"
-             f"Расходы: {b}.0",
-        reply_markup=reply_markup
-    )
+        await context.bot.send_message(
+            chat_id=query.from_user.id,
+            text=f"———\n"
+                 f"в этом месяце: {b}.0 \n"
+                 f"Сегодня: {a}.0",
+            reply_markup=reply_markup,
+        )
+    elif query.data == '166':
+        query = update.callback_query
+        await query.answer()
+        cat_name = query.message.text.split('\n')[1]
+        date = query.message.text.split('\n')[0]
+        profile = Profile.objects.get(external_id=query.from_user.id)
+
+        category_id = CategoryEx.objects.get(name=cat_name)
+        month_data_delete = MonthsEx.objects.filter(profile=profile, id_category=category_id.id,
+                                                    date__year=date.split('-')[0],
+                                                    date__month=date.split('-')[1]).delete()
+        day_data_delete = DayEx.objects.filter(profile=profile, id_category=category_id.id,
+                                               date__year=date.split('-')[0],
+                                               date__month=date.split('-')[1]).delete()
+
+        await query.delete_message()
+
+        await context.bot.send_message(
+            chat_id=query.from_user.id,
+            text=f'Вы успешно удалили категорию -- {cat_name}'
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton("День", callback_data=str(DAY)),
+                InlineKeyboardButton("Месяц", callback_data=str(MONTH)),
+            ],
+            [InlineKeyboardButton("Настройки", callback_data=str(SETTINGS))],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        pro = query.from_user.id
+        prof = Profile.objects.get(external_id=pro)
+        prof_id = prof.id
+
+        today = datetime.date.today()
+        year = today.year
+        month = today.month
+        day = today.day
+
+        day_expens = DayEx.objects.filter(profile=prof_id, date=datetime.date.today())
+        month_expens = MonthsEx.objects.filter(profile=prof_id, date__year=year, date__month=month)
+        a = 0
+        b = 0
+        for i in day_expens:
+            a += i.sum
+        for j in month_expens:
+            b += j.sum
+
+        await context.bot.send_message(
+            chat_id=query.from_user.id,
+            text=f"———\n"
+                 f"в этом месяце: {b}.0 \n"
+                 f"Сегодня: {a}.0",
+            reply_markup=reply_markup,
+        )
+    else:
+        keyboard = [
+            [
+                InlineKeyboardButton("День", callback_data=str(DAY)),
+                InlineKeyboardButton("Месяц", callback_data=str(MONTH)),
+            ],
+            [InlineKeyboardButton("Настройки", callback_data=str(SETTINGS))],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        pro = query.from_user.id
+        prof = Profile.objects.get(external_id=pro)
+        prof_id = prof.id
+
+        today = datetime.date.today()
+        year = today.year
+        month = today.month
+        day = today.day
+
+        day_expens = DayEx.objects.filter(profile=prof_id, date=datetime.date.today())
+        month_expens = MonthsEx.objects.filter(profile=prof_id, date__year=year, date__month=month)
+        a = 0
+        b = 0
+        for i in day_expens:
+            a += i.sum
+        for j in month_expens:
+            b += j.sum
+
+        await query.edit_message_text(
+            text=f"———\n"
+                 f"в этом месяце: {b}.0 \n"
+                 f"Сегодня: {a}.0",
+            reply_markup=reply_markup,
+        )
 
 
-async def back_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     keyboard = [
         [
-            InlineKeyboardButton("День", callback_data=str(DAY)),
-            InlineKeyboardButton("Месяц", callback_data=str(MONTH)),
+            InlineKeyboardButton("Получить выписку", callback_data=str(DATA)),
         ],
-        [InlineKeyboardButton("Настройки", callback_data=str(SETTINGS))],
+        [InlineKeyboardButton("Назад", callback_data=str(BACK))]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    pro = query.from_user.id
-    prof = Profile.objects.get(external_id=pro)
-    prof_id = prof.id
-
-    today = datetime.date.today()
-    year = today.year
-    month = today.month
-    day = today.day
-
-    day_expens = DayEx.objects.filter(profile=prof_id, date=datetime.date.today())
-    month_expens = MonthsEx.objects.filter(profile=prof_id, date__year=year, date__month=month)
-    a = 0
-    b = 0
-    for i in day_expens:
-        a += i.sum
-    for j in month_expens:
-        b += j.sum
-
     await query.edit_message_text(
-        text=f"———\n"
-             f"в этом месяце: {b}.0 \n"
-             f"Сегодня: {a}.0",
+        text="Настройки",
         reply_markup=reply_markup,
     )
-
-
-async def months_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    keyboard = [
-        [InlineKeyboardButton("Назад", callback_data=str(BACK_MON))]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    profile = Profile.objects.get(external_id=query.from_user.id)
-    name_category = CategoryEx.objects.get(name=query.data)
-    expens = MonthsEx.objects.filter(profile=profile.id, id_category=name_category.id,
-                                     date__month=datetime.date.today().month, date__year=datetime.date.today().year)
-    months_expenses = 0
-
-    date_l_expenses = ""
-
-    for item in expens:
-        months_expenses += item.sum
-        date_l_expenses += f"----- {item.date} -----\n" \
-                           f"◦ {item.sum}.0\n"
-
-    await query.edit_message_text(
-        text=f"{query.data}\n"
-             f"\n"
-             f"{calendar.month_name[datetime.date.today().month]} {datetime.date.today().year}\n"
-             f"Расходы: {months_expenses}.0\n"
-             f"\n"
-             f"{date_l_expenses}\n",
-        reply_markup=reply_markup
-    )
-
-
-async def day_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    call_back_data = query.data
-    date = query.message.text.split('\n')[0]
-
-    keyboard = [
-        [InlineKeyboardButton("Назад", callback_data=str(QWER))]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    profile = Profile.objects.get(external_id=query.from_user.id)
-    name_category = CategoryEx.objects.get(name=call_back_data[1:])
-    expens = DayEx.objects.filter(profile=profile.id, id_category=name_category.id, date=date)
-
-    months_expenses = 0
-    date_l_expenses = f"----- {date} -----\n"
-
-    for item in expens:
-        months_expenses += item.sum
-        date_l_expenses += f"◦ {item.sum}.0\n"
-
-    await query.edit_message_text(
-        text=f"{query.data[1:]}\n"
-             f"\n"
-             f"{calendar.month_name[datetime.date.today().month]} {datetime.date.today().year}\n"
-             f"Расходы: {months_expenses}.0\n"
-             f"\n"
-             f"{date_l_expenses}\n",
-        reply_markup=reply_markup
-    )
-
-
-async def days(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    pro = query.from_user.id
-    prof = Profile.objects.get(external_id=pro)
-    prof_id = prof.id
-    if query.data == '7':
-        today = query.message.text.split('\n')[0]
-        yesterday = datetime.datetime.strptime(today, '%Y-%m-%d') - timedelta(1)
-
-        days_expenses = DayEx.objects.filter(profile=prof_id, date=yesterday)
-        day1 = DayEx.objects.filter(profile=prof_id, date=yesterday).values('id_category').annotate(
-            Sum('sum')).order_by()
-        list_of = []
-        for i in day1:
-            category_name = str(CategoryEx.objects.get(id=i.get("id_category")))
-            sum_sum = i.get('sum__sum')
-            res_name = re.sub(f'[0-9]', '', category_name).strip()
-            list_of.append(
-                [InlineKeyboardButton(f"{res_name}: {sum_sum}.0", callback_data=f"0{res_name}")])
-
-        b = 0
-        for j in days_expenses:
-            b += j.sum
-
-        list_of.append([InlineKeyboardButton(text='<<', callback_data=str(YESTERDAY)),
-                        InlineKeyboardButton(text='>>', callback_data=str(TOMORROW)),
-                        ])
-        list_of.append([InlineKeyboardButton('Назад', callback_data=str(BACK))])
-
-        reply_markup = InlineKeyboardMarkup(list_of)
-
-        await query.edit_message_text(
-            text=f"{yesterday.strftime('%Y-%m-%d')}\n"
-                 f"Расходы: {b}.0 ", reply_markup=reply_markup
-        )
-    elif query.data == '8':
-        today = query.message.text.split('\n')[0]
-        tomorrow = datetime.datetime.strptime(today, '%Y-%m-%d') + timedelta(1)
-
-        days_expenses = DayEx.objects.filter(profile=prof_id, date=tomorrow)
-        day1 = DayEx.objects.filter(profile=prof_id, date=tomorrow).values('id_category').annotate(
-            Sum('sum')).order_by()
-        list_of = []
-        for i in day1:
-            category_name = str(CategoryEx.objects.get(id=i.get("id_category")))
-            sum_sum = i.get('sum__sum')
-            res_name = re.sub(f'[0-9]', '', category_name).strip()
-            list_of.append(
-                [InlineKeyboardButton(f"{res_name}: {sum_sum}.0", callback_data=f"0{res_name}")])
-
-        b = 0
-        for j in days_expenses:
-            b += j.sum
-
-        list_of.append([InlineKeyboardButton(text='<<', callback_data=str(YESTERDAY)),
-                        InlineKeyboardButton(text='>>', callback_data=str(TOMORROW)),
-                        ])
-        list_of.append([InlineKeyboardButton('Назад', callback_data=str(BACK))])
-
-        reply_markup = InlineKeyboardMarkup(list_of)
-
-        await query.edit_message_text(
-            text=f"{tomorrow.strftime('%Y-%m-%d')}\n"
-                 f"Расходы: {b}.0 ", reply_markup=reply_markup
-        )
 
 
 if __name__ == '__main__':
@@ -350,8 +263,18 @@ application.add_handler(CallbackQueryHandler(month_expenses, pattern="^" + str(M
 application.add_handler(CallbackQueryHandler(back_menu, pattern="^" + str(BACK) + "$"))
 application.add_handler(CallbackQueryHandler(month_expenses, pattern="^" + str(BACK_MON) + "$"))
 application.add_handler(CallbackQueryHandler(day_expenses, pattern="^" + str(QWER) + "$"))
-application.add_handler(CallbackQueryHandler(days, pattern="^" + str(YESTERDAY) + "$"))
-application.add_handler(CallbackQueryHandler(days, pattern="^" + str(TOMORROW) + "$"))
+application.add_handler(CallbackQueryHandler(scrolling_days, pattern="^" + str(YESTERDAY) + "$"))
+application.add_handler(CallbackQueryHandler(scrolling_days, pattern="^" + str(TOMORROW) + "$"))
+application.add_handler(CallbackQueryHandler(scrolling_months, pattern="^" + str(LAST_MONTH) + "$"))
+application.add_handler(CallbackQueryHandler(scrolling_months, pattern="^" + str(NEXT_MONTH) + "$"))
+application.add_handler(CallbackQueryHandler(settings, pattern="^" + str(SETTINGS) + "$"))
+application.add_handler(CallbackQueryHandler(delete_check, pattern="^" + str(DELETE_DAY) + "$"))
+application.add_handler(CallbackQueryHandler(delete_check, pattern="^" + str(122) + "$"))
+application.add_handler(CallbackQueryHandler(day_expenses, pattern="^" + str(NO_DEL_DAY) + "$"))
+application.add_handler(CallbackQueryHandler(delete, pattern="^" + str(DELETE_DAY_2) + "$"))
+application.add_handler(CallbackQueryHandler(delete, pattern="^" + str(155) + "$"))
+application.add_handler(CallbackQueryHandler(back_menu, pattern="^" + str(DELETE_ANSWER) + "$"))
+application.add_handler(CallbackQueryHandler(back_menu, pattern="^" + str(166) + "$"))
 
 for i in CategoryEx.objects.all():
     application.add_handler(CallbackQueryHandler(months_detail, str(i.name)))
